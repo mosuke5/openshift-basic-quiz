@@ -1,59 +1,134 @@
 ---
-- name: OpenShiftリソースの確認
+- name: Kubernetes初級クイズの採点
   hosts: localhost
   gather_facts: false
   
   vars:
     namespace: container-quiz
-    proxy_url: "http://10.64.200.121:3128"
   
   tasks:
     - name: プロキシ設定をKubernetesクライアントに追加
       set_fact:
-        k8s_auth_proxy: "{{ proxy_url }}"
+        k8s_auth_proxy: "{{ proxy_url | default(omit) }}"
+      when: proxy_url is defined
         
-    - name: Namespaceの存在確認
+    - name: 1. Namespaceの存在確認
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Namespace
         name: "{{ namespace }}"
-        proxy: "{{ k8s_auth_proxy }}"
+        proxy: "{{ k8s_auth_proxy | default(omit) }}"
       register: namespace_check
       
     - name: Namespaceが存在しない場合は失敗
       ansible.builtin.fail:
-        msg: "Namespace {{ namespace }} が存在しません"
+        msg: "要件1: container-quiz Namespaceが存在しません"
       when: namespace_check.resources | length == 0
         
-    - name: hogeデプロイメントの存在確認
+    - name: 2. hogeデプロイメントの存在確認とイメージチェック
       kubernetes.core.k8s_info:
         api_version: apps/v1
         kind: Deployment
         name: hoge
         namespace: "{{ namespace }}"
-        proxy: "{{ k8s_auth_proxy }}"
+        proxy: "{{ k8s_auth_proxy | default(omit) }}"
       register: deployment_check
 
-    - name: hogeデプロイメントの環境変数FOOの確認
+    - name: hogeデプロイメントが存在しない場合は失敗
       ansible.builtin.fail:
-        msg: "環境変数FOOが設定されていません"
-      when: 
-        - deployment_check.resources | length > 0
-        - "'FOO' not in (deployment_check.resources[0].spec.template.spec.containers[0].env | map(attribute='name') | list)"
+        msg: "要件2: container-quiz Namespace内にhoge Deploymentが存在しません"
+      when: deployment_check.resources | length == 0
 
-    - name: barコンフィグマップの存在確認
+    - name: コンテナイメージの確認
+      ansible.builtin.fail:
+        msg: "要件2: コンテナイメージが nginxinc/nginx-unprivileged:latest ではありません"
+      when: deployment_check.resources[0].spec.template.spec.containers[0].image != 'nginxinc/nginx-unprivileged:latest'
+
+    - name: 3. 環境変数FOO=BARの確認
+      ansible.builtin.fail:
+        msg: "要件3: 環境変数FOO=BARが正しく設定されていません"
+      when: >
+        not (deployment_check.resources[0].spec.template.spec.containers[0].env | 
+        selectattr('name', 'equalto', 'FOO') | 
+        selectattr('value', 'equalto', 'BAR') | list)
+
+    - name: 4. Serviceの存在確認
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        namespace: "{{ namespace }}"
+        label_selectors:
+          - "app=hoge"
+        proxy: "{{ k8s_auth_proxy | default(omit) }}"
+      register: service_check
+
+    - name: Serviceが存在しない場合は失敗
+      ansible.builtin.fail:
+        msg: "要件4: hogeデプロイメントを公開するServiceが存在しません"
+      when: service_check.resources | length == 0
+
+    - name: Routeの存在確認
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: "{{ namespace }}"
+        proxy: "{{ k8s_auth_proxy | default(omit) }}"
+      register: route_check
+
+    - name: Routeが存在しない場合は失敗
+      ansible.builtin.fail:
+        msg: "要件4: hogeデプロイメントを公開するRouteが存在しません"
+      when: route_check.resources | length == 0
+
+    - name: 5. test-cmコンフィグマップの存在確認
       kubernetes.core.k8s_info:
         api_version: v1
         kind: ConfigMap
-        name: bar
+        name: test-cm
         namespace: "{{ namespace }}"
-        proxy: "{{ k8s_auth_proxy }}"
+        proxy: "{{ k8s_auth_proxy | default(omit) }}"
       register: configmap_check
 
-    - name: hogeデプロイメントへのbarコンフィグマップのマウント確認
+    - name: test-cmの内容確認
       ansible.builtin.fail:
-        msg: "barコンフィグマップがマウントされていません"
-      when:
-        - deployment_check.resources | length > 0
-        - configmap_check.resources | length > 0
-        - not (deployment_check.resources[0].spec.template.spec.volumes | selectattr('configMap.name', 'equalto', 'bar') | list) 
+        msg: "要件5: ConfigMapのキーcm-keyの値がcm-valueではありません"
+      when: >
+        configmap_check.resources[0].data['cm-key'] != 'cm-value'
+
+    - name: 6. ConfigMapの環境変数マウント確認
+      ansible.builtin.fail:
+        msg: "要件6: ConfigMap test-cmが環境変数としてマウントされていません"
+      when: >
+        not (deployment_check.resources[0].spec.template.spec.containers[0].envFrom | 
+        selectattr('configMapRef.name', 'equalto', 'test-cm') | list)
+
+    - name: 7. test-secretの存在確認
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: test-secret
+        namespace: "{{ namespace }}"
+        proxy: "{{ k8s_auth_proxy | default(omit) }}"
+      register: secret_check
+
+    - name: test-secretの内容確認
+      ansible.builtin.fail:
+        msg: "要件7: Secretのキーsecret-keyの値がsecret-valueではありません"
+      when: >
+        secret_check.resources[0].data['secret-key'] != 'c2VjcmV0LXZhbHVl'  # base64エンコードされた'secret-value'
+
+    - name: 8. Secretの環境変数マウント確認
+      ansible.builtin.fail:
+        msg: "要件8: Secret test-secretが環境変数としてマウントされていません"
+      when: >
+        not (deployment_check.resources[0].spec.template.spec.containers[0].envFrom | 
+        selectattr('secretRef.name', 'equalto', 'test-secret') | list)
+
+    - name: 9. レプリカ数の確認
+      ansible.builtin.fail:
+        msg: "要件9: Deploymentのレプリカ数が3ではありません"
+      when: deployment_check.resources[0].spec.replicas != 3
+
+    - name: すべての要件を満たしている場合の成功メッセージ
+      ansible.builtin.debug:
+        msg: "おめでとうございます！すべての要件を満たしています！" 
