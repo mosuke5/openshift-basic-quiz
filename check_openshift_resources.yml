@@ -1,0 +1,59 @@
+---
+- name: OpenShiftリソースの確認
+  hosts: localhost
+  gather_facts: false
+  
+  vars:
+    namespace: container-quiz
+    proxy_url: "http://10.64.200.121:3128"
+  
+  tasks:
+    - name: プロキシ設定をKubernetesクライアントに追加
+      set_fact:
+        k8s_auth_proxy: "{{ proxy_url }}"
+        
+    - name: Namespaceの存在確認
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ namespace }}"
+        proxy: "{{ k8s_auth_proxy }}"
+      register: namespace_check
+      
+    - name: Namespaceが存在しない場合は失敗
+      ansible.builtin.fail:
+        msg: "Namespace {{ namespace }} が存在しません"
+      when: namespace_check.resources | length == 0
+        
+    - name: hogeデプロイメントの存在確認
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: hoge
+        namespace: "{{ namespace }}"
+        proxy: "{{ k8s_auth_proxy }}"
+      register: deployment_check
+
+    - name: hogeデプロイメントの環境変数FOOの確認
+      ansible.builtin.fail:
+        msg: "環境変数FOOが設定されていません"
+      when: 
+        - deployment_check.resources | length > 0
+        - "'FOO' not in (deployment_check.resources[0].spec.template.spec.containers[0].env | map(attribute='name') | list)"
+
+    - name: barコンフィグマップの存在確認
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: bar
+        namespace: "{{ namespace }}"
+        proxy: "{{ k8s_auth_proxy }}"
+      register: configmap_check
+
+    - name: hogeデプロイメントへのbarコンフィグマップのマウント確認
+      ansible.builtin.fail:
+        msg: "barコンフィグマップがマウントされていません"
+      when:
+        - deployment_check.resources | length > 0
+        - configmap_check.resources | length > 0
+        - not (deployment_check.resources[0].spec.template.spec.volumes | selectattr('configMap.name', 'equalto', 'bar') | list) 
